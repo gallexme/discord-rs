@@ -33,6 +33,7 @@ extern crate opus;
 extern crate time;
 #[macro_use]
 extern crate log;
+extern crate sodiumoxide;
 
 use std::collections::BTreeMap;
 use serde_json::builder::ObjectBuilder;

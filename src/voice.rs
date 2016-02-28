@@ -234,6 +234,7 @@ fn voice_thread(
 	channel: mpsc::Receiver<Status>,
 ) -> Result<()> {
 	use opus;
+	use sodiumoxide::crypto::secretbox as crypto;
 	use std::io::Cursor;
 
 	// read the first websocket message
@@ -241,8 +242,8 @@ fn voice_thread(
 		VoiceEvent::Handshake { heartbeat_interval, port, ssrc, modes } => (heartbeat_interval, port, ssrc, modes),
 		_ => return Err(Error::Protocol("First voice event was not Handshake"))
 	};
-	if !modes.iter().find(|&s| s == "plain").is_some() {
-		return Err(Error::Protocol("Voice mode \"plain\" unavailable"))
+	if !modes.iter().find(|&s| s == "xsalsa20_poly1305").is_some() {
+		return Err(Error::Protocol("Voice mode \"xsalsa20_poly1305\" unavailable"))
 	}
 
 	// bind a UDP socket and send the ssrc value in a packet as identification
@@ -272,21 +273,20 @@ fn voice_thread(
 			.insert_object("data", |object| object
 				.insert("address", "")
 				.insert("port", port_number)
-				.insert("mode", "plain")
+				.insert("mode", "xsalsa20_poly1305")
 			)
 		)
 		.unwrap();
 	try!(sender.send_message(&WsMessage::text(try!(serde_json::to_string(&map)))));
 
 	// discard websocket messages until we get the Ready
+	let encryption_key;
 	loop {
 		match try!(recv_message(&mut receiver)) {
 			VoiceEvent::Ready { mode, secret_key } => {
-				if secret_key.len() != 0 {
-					debug!("Secret key: {:?}", secret_key);
-				}
-				if mode != "plain" {
-					return Err(Error::Protocol("Voice mode in Ready was not \"plain\""))
+				encryption_key = crypto::Key::from_slice(&secret_key).expect("failed to create key");
+				if mode != "xsalsa20_poly1305" {
+					return Err(Error::Protocol("Voice mode in Ready was not \"xsalsa20_poly1305\""))
 				}
 				break
 			}
@@ -315,6 +315,8 @@ fn voice_thread(
 	let keepalive_duration = ::time::Duration::milliseconds(interval as i64);
 	let mut audio_timer = ::Timer::new(audio_duration);
 	let mut keepalive_timer = ::Timer::new(keepalive_duration);
+
+	let mut nonce = crypto::Nonce([0; 24]);
 
 	// start the main loop
 	info!("Voice connected to {}", endpoint);
@@ -365,12 +367,13 @@ fn voice_thread(
 			try!(packet.write_u16::<BigEndian>(sequence));
 			try!(packet.write_u32::<BigEndian>(timestamp));
 			try!(packet.write_u32::<BigEndian>(ssrc));
-			let zeroes = packet.capacity() - HEADER_LEN;
-			packet.extend(::std::iter::repeat(0).take(zeroes));
+			nonce.0[..12].clone_from_slice(&packet[..12]);
 
 			// encode the audio data and transmit it
-			let len = opus.encode(&audio_buffer, &mut packet[HEADER_LEN..]).expect("failed encode");
-			try!(udp.send_to(&packet[..len + HEADER_LEN], destination));
+			let mut new_opus_buf = [0; 256];
+			let len = opus.encode(&audio_buffer, &mut new_opus_buf).expect("failed encode");
+			packet.extend(crypto::seal(&new_opus_buf[..len], &nonce, &encryption_key));
+			try!(udp.send_to(&packet[..], destination));
 
 			sequence = sequence.wrapping_add(1);
 			timestamp = timestamp.wrapping_add(960);
