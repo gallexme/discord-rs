@@ -169,7 +169,7 @@ pub fn open_ytdl_stream(url: &str) -> Result<AudioSource> {
 	let output = try!(Command::new("youtube-dl")
 		.args(&[
 			"-f", "webm[abr>0]/bestaudio/best",
-			"--no-playlist", "--print-json",
+			"--print-json",
 			"--skip-download",
 			url])
 		.stdin(Stdio::null())
